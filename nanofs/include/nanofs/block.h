@@ -23,13 +23,15 @@ inline constexpr block_id NULL_BLOCK = 0;
 enum class BlockKind { Meta, Data };
 
 // The lowest-level block device interface: whole-block I/O, pluggable backend.
-// The inode and fs layers depend only on this and never see the backend.
+//?The inode and fs layers depend only on this and never see the backend.
 class BlockDevice {
  public:
   virtual ~BlockDevice() = default;
   // Read block id into buf. buf.size() must equal block_size() (else Error::Invalid);
   // an out-of-range id is Error::IoError.
   virtual Result<void> read_block(block_id id, std::span<std::byte> buf) = 0;
+  //? About std::span, it wraps the ptr and the length to represent a contious memory(say vector or array)
+
   // Write block id. Same size and range rules as read_block. kind says whether the block
   // is metadata or file content; the provided device treats both alike.
   virtual Result<void> write_block(block_id id, std::span<const std::byte> buf,
@@ -46,6 +48,7 @@ class BlockDevice {
 };
 
 // Simulated block device with two backends: in-memory, or a file image.
+//?use file image as a virtual disk
 class SimulatedBlockDevice : public BlockDevice {
  public:
   SimulatedBlockDevice(size_t block_size, size_t num_blocks);   // in-memory backend

@@ -41,7 +41,7 @@ struct inode {
   uint32_t atime;
   uint32_t mtime;
   uint32_t ctime;
-  uint32_t blocks[NDIRECT + 2];   // [0..99] direct, [100] single indirect, [101] double indirect
+  uint32_t blocks[NDIRECT + 2];   //? [0..99] direct, [100] single indirect, [101] double indirect
 };
 static_assert(std::is_trivially_copyable_v<inode>);
 

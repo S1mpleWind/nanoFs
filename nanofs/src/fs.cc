@@ -28,12 +28,142 @@ static Result<void> write_ptrs(BlockDevice& dev, block_id blk, const std::vector
   return dev.write_block(blk, buf);
 }
 
-Result<block_id> FsLayer::logical_to_physical_block(inode& node, uint32_t idx,
+Result<block_id> FsLayer::logical_to_physical_block(inode& node, uint32_t logical_idx,
                                                     bool allocate,
                                                     BlockAllocator& balloc,
                                                     uint32_t bs) {
   /* TODO Lab1A: Your code here */
-  return std::unexpected(Error::IoError);
+  //*1. calculate position
+  //uint32_t block_id_size; //size of block_id is 4 bytes
+  // 一个间接块里可以保存多少个 block_id（物理块号）。
+  const uint64_t num_ptr_per_block = bs / sizeof(block_id);
+  const uint64_t single_start = NDIRECT;
+  const uint64_t double_start = single_start + num_ptr_per_block;
+  const uint64_t capacity = double_start + num_ptr_per_block * num_ptr_per_block;
+
+  //*0. check boundary
+  // logical_idx 是 uint32_t，不会小于 0；这里只需检查上限。
+  if (num_ptr_per_block == 0 || logical_idx >= capacity)
+    return std::unexpected(Error::Invalid);
+
+  //*0.5 prepare an allocate function for reuse
+  // allocate=false 遇到空指针时返回 NULL_BLOCK；allocate=true 才创建缺少的块。
+  // 新块先清零：间接表从 NULL_BLOCK 开始，数据块的未写部分读为 0。
+  auto allocate_zeroed_block = [&]() -> Result<block_id> {
+    auto id = balloc.allocate();
+    if (!id) return std::unexpected(id.error());
+    if (auto r = dev_.zero_block(*id); !r) {
+      (void)balloc.free(*id);
+      return std::unexpected(r.error());
+    }
+    return *id;
+  };
+
+  //*2. judge which tier level(1,2,3)
+  block_id physical_idx = NULL_BLOCK;
+  if (logical_idx < NDIRECT) {
+    //* Tier 1: inode 直接保存数据块的物理块号。
+    physical_idx = node.blocks[logical_idx];
+    if (physical_idx == NULL_BLOCK) {
+      if (!allocate) return NULL_BLOCK;  // 未分配的逻辑块是 hole，不是错误。
+      auto id = allocate_zeroed_block();
+      if (!id) return std::unexpected(id.error());
+      physical_idx = *id;
+      node.blocks[logical_idx] = physical_idx;
+    }
+    return physical_idx;
+  }
+
+  if (logical_idx < double_start) {
+    //* Tier 2: inode 指向一级间接表，表项再指向数据块。
+    block_id single_table_block = node.blocks[NDIRECT];
+
+    // check single_table
+    if (single_table_block == NULL_BLOCK) {
+      if (!allocate) return NULL_BLOCK;
+      auto id = allocate_zeroed_block();
+      if (!id) return std::unexpected(id.error());
+      single_table_block = *id;
+      node.blocks[NDIRECT] = single_table_block;
+    }
+    
+    //calculate inner offset
+    const uint32_t single_offset =
+        static_cast<uint32_t>(logical_idx - single_start);
+
+    //fetch id from physical block, using private Block Device         
+    auto single_ptrs = read_ptrs(dev_, single_table_block);
+    if (!single_ptrs) return std::unexpected(single_ptrs.error());
+    physical_idx = (*single_ptrs)[single_offset];
+    
+    // check direct node if is null
+    if (physical_idx == NULL_BLOCK) {
+      // disable allocate
+      if (!allocate) return NULL_BLOCK;
+
+      // enable allocate
+      auto id = allocate_zeroed_block();
+      if (!id) return std::unexpected(id.error());
+      physical_idx = *id;
+      (*single_ptrs)[single_offset] = physical_idx; //write the newly allocated block
+      if (auto r = write_ptrs(dev_, single_table_block, *single_ptrs); !r) {
+        (void)balloc.free(physical_idx);
+        return std::unexpected(r.error());
+      }
+    }
+    return physical_idx;
+  }
+
+  // handle double layer
+  // *Tier 3: inode -> double-indirect table -> single-indirect table -> data block.
+  block_id double_table_block = node.blocks[NDIRECT + 1];
+  if (double_table_block == NULL_BLOCK) {
+    if (!allocate) return NULL_BLOCK;
+    auto id = allocate_zeroed_block();
+    if (!id) return std::unexpected(id.error());
+    double_table_block = *id;
+    node.blocks[NDIRECT + 1] = double_table_block;
+  }
+
+  const uint64_t double_relative = logical_idx - double_start;
+  const uint32_t double_offset =
+      static_cast<uint32_t>(double_relative / num_ptr_per_block);
+  const uint32_t offset =
+      static_cast<uint32_t>(double_relative % num_ptr_per_block);
+
+  auto double_ptrs = read_ptrs(dev_, double_table_block);
+  if (!double_ptrs) return std::unexpected(double_ptrs.error());
+  block_id single_table_block = (*double_ptrs)[double_offset];
+  if (single_table_block == NULL_BLOCK) {
+    if (!allocate) return NULL_BLOCK;
+    auto id = allocate_zeroed_block();
+    if (!id) return std::unexpected(id.error());
+    single_table_block = *id;
+    (*double_ptrs)[double_offset] = single_table_block;
+    if (auto r = write_ptrs(dev_, double_table_block, *double_ptrs); !r) {
+      (void)balloc.free(single_table_block);
+      return std::unexpected(r.error());
+    }
+  }
+
+  //*handle single layer
+  // 读二级间接结构里的下一层表，再用 offset 找到实际数据块。
+  auto single_ptrs = read_ptrs(dev_, single_table_block);
+  if (!single_ptrs) return std::unexpected(single_ptrs.error());
+  physical_idx = (*single_ptrs)[offset];
+  if (physical_idx == NULL_BLOCK) {
+    if (!allocate) return NULL_BLOCK;
+    auto id = allocate_zeroed_block();
+    if (!id) return std::unexpected(id.error());
+    physical_idx = *id;
+    (*single_ptrs)[offset] = physical_idx;
+    if (auto r = write_ptrs(dev_, single_table_block, *single_ptrs); !r) {
+      (void)balloc.free(physical_idx);
+      return std::unexpected(r.error());
+    }
+  }
+  return physical_idx;
+
 }
 
 Result<std::string> FsLayer::read_bytes(inode& node, uint32_t off,
