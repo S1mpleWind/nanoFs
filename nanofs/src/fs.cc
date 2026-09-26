@@ -252,7 +252,21 @@ Result<uint32_t> FsLayer::write_bytes(inode_id id, inode& node, uint32_t off,
 
 Result<Attr> FsLayer::getattr(inode_id id) {
   /* TODO Lab1A: Your code here */
-  return std::unexpected(Error::IoError);
+  /*
+    struct Attr { uint32_t inode_id; bool is_dir; uint32_t size; };
+   */
+  //* 0.get the inode
+  auto node = inodes_.read_inode(id);
+  if (!node) return std::unexpected(node.error());
+
+  //* 1.get attr
+  Attr attr{
+      .inode_id = id,
+      .is_dir = node->type == INODE_DIR,
+      .size = node->size,
+  };
+
+  return attr;
 }
 
 Result<std::string> FsLayer::read_file(inode_id id, uint32_t off, uint32_t len) {
@@ -282,12 +296,36 @@ Result<uint32_t> FsLayer::write_file(inode_id id, uint32_t off,
 // compaction on delete, a hash index); the tests do not require it.
 Result<std::vector<DirEntry>> FsLayer::read_dir_entries(inode_id dir) {
   /* TODO Lab1A: Your code here */
-  return std::unexpected(Error::IoError);
+  //* 0. read and validate the directory inode
+  auto node = inodes_.read_inode(dir);
+  if (!node) return std::unexpected(node.error());
+  if (node->type != INODE_DIR)
+    return std::unexpected(Error::NotDir);
+
+  //* 1. read the directory file; unused slots are skipped
+  auto bytes = read_bytes(*node, 0, node->size);
+  if (!bytes) return std::unexpected(bytes.error());
+
+  std::vector<DirEntry> entries;
+  for (size_t off = 0; off + sizeof(DirEntry) <= bytes->size();
+       off += sizeof(DirEntry)) {
+    DirEntry entry{};
+    std::memcpy(&entry, bytes->data() + off, sizeof(entry));
+    if (entry.inode_id != 0) entries.push_back(entry);
+  }
+  return entries;
 }
 
 Result<inode_id> FsLayer::lookup(inode_id parent, const std::string& name) {
   /* TODO Lab1A: Your code here */
-  return std::unexpected(Error::IoError);
+  auto entries = read_dir_entries(parent);
+  if (!entries) return std::unexpected(entries.error());
+
+  for (const auto& entry : *entries) {
+    if (std::strncmp(entry.name, name.c_str(), NANOFS_NAME_MAX) == 0)
+      return entry.inode_id;
+  }
+  return std::unexpected(Error::NotFound);
 }
 
 // Provided: public entry for read_dir_entries.
@@ -298,7 +336,53 @@ Result<std::vector<DirEntry>> FsLayer::readdir(inode_id dir) {
 Result<void> FsLayer::add_dir_entry(inode_id dir, const std::string& name,
                                     inode_id target) {
   /* TODO Lab1A: Your code here */
-  return std::unexpected(Error::IoError);
+  //* 0. validate the name and target
+  if (name.size() >= NANOFS_NAME_MAX || target == 0)
+    return std::unexpected(Error::Invalid);
+
+  auto node = inodes_.read_inode(dir); //get the parent directory inode
+  if (!node) return std::unexpected(node.error());
+  if (node->type != INODE_DIR)
+    return std::unexpected(Error::NotDir);
+
+  //* 1. reject duplicate names and find a reusable slot
+  auto raw = read_bytes(*node, 0, node->size); //node,offset,length
+  if (!raw) return std::unexpected(raw.error());
+
+  uint32_t slot = std::numeric_limits<uint32_t>::max();
+  for (uint32_t off = 0; off + sizeof(DirEntry) <= raw->size();
+       off += sizeof(DirEntry)) {
+    DirEntry entry{}; 
+    //?Directory entry: fixed 64 bytes. inode_id == 0 marks a free slot;
+    //?name is NUL-terminated (<= 59 chars).
+    std::memcpy(&entry, raw->data() + off, sizeof(entry));
+
+    // reject dup name
+    if (entry.inode_id != 0 &&
+        std::strncmp(entry.name, name.c_str(), NANOFS_NAME_MAX) == 0)
+      return std::unexpected(Error::Exists);
+    
+    // record the first free slot (when deleting, only inode_id will be set 0)
+    if (entry.inode_id == 0 && slot == std::numeric_limits<uint32_t>::max())
+      slot = off;
+  }
+
+  //* 2. append when no free slot exists
+  if (slot == std::numeric_limits<uint32_t>::max())
+    slot = node->size;//move slot to the tail
+
+  // build the new entry
+  DirEntry entry{};
+  entry.inode_id = target;
+  std::memcpy(entry.name, name.data(), name.size());
+  // encode entry to bytes
+  std::string encoded(sizeof(entry), '\0');
+  std::memcpy(encoded.data(), &entry, sizeof(entry));
+
+  // write back the entry bytes
+  if (auto r = write_bytes(dir, *node, slot, encoded); !r)
+    return std::unexpected(r.error());
+  return {};
 }
 
 Result<void> FsLayer::remove_dir_entry(inode_id dir, const std::string& name) {
@@ -309,7 +393,29 @@ Result<void> FsLayer::remove_dir_entry(inode_id dir, const std::string& name) {
 Result<inode_id> FsLayer::make_node(inode_id parent, const std::string& name,
                                     uint32_t type) {
   /* TODO Lab1A: Your code here */
-  return std::unexpected(Error::IoError);
+  //* 0. verify that the parent is a directory
+  auto parent_node = inodes_.read_inode(parent);
+  if (!parent_node) return std::unexpected(parent_node.error());
+  if (parent_node->type != INODE_DIR)
+    return std::unexpected(Error::NotDir);
+
+  //* 1. an existing name is idempotent
+  auto existing = lookup(parent, name);
+  if (existing) return *existing;
+  if (existing.error() != Error::NotFound)
+    return std::unexpected(existing.error());
+
+  //* 2. allocate the inode before linking it into the parent
+  auto child = inodes_.allocate_inode(type);
+  if (!child) return std::unexpected(child.error());
+
+  //* 3. roll back the inode if adding the directory entry fails
+  if (auto r = add_dir_entry(parent, name, *child); !r) {
+    (void)inodes_.free_inode(*child);
+    return std::unexpected(r.error());
+  }
+
+  return *child;
 }
 
 // Provided: create/mkdir differ only in the inode type; the work is in make_node.
@@ -339,6 +445,216 @@ Result<void> FsLayer::rmdir(inode_id parent, const std::string& name) {
 
 Result<Attr> FsLayer::setattr(inode_id id, uint32_t new_size) {
   /* TODO Lab1A: Your code here */
-  return std::unexpected(Error::IoError);
+  //* 0. read inode
+  auto node = inodes_.read_inode(id);
+  const uint32_t bs = static_cast<uint32_t>(dev_.block_size());
+  if (!node) return std::unexpected(node.error());
+
+  if (node->type == INODE_DIR)
+    return std::unexpected(Error::IsDir);
+
+  if (new_size == node->size){
+    Attr attr{
+        .inode_id = id,
+        .is_dir = node->type == INODE_DIR,
+        .size = node->size,
+    };
+
+    return attr;
+  }
+
+  //*1. prepare allocator
+  auto sb = super();
+  if (!sb) return std::unexpected(sb.error());
+
+  BlockAllocator balloc(
+      dev_,
+      sb->block_bitmap_start,
+      sb->block_bitmap_blocks,
+      sb->data_start,
+      sb->num_blocks);
+
+  //*2. handle different length
+
+  //*2.1 shrink
+  if (new_size < node->size) {
+    const uint32_t old_size = node->size;
+    const uint32_t tail_idx =
+        (new_size + bs - 1) / bs;
+    const uint32_t p = bs / sizeof(block_id);
+
+    // TODO
+    // - 保留 [0, ceil(new_size / bs)) 的逻辑块
+    // - 释放之后的逻辑块
+    // - 清理不再需要的 indirect blocks
+    // - 清零最后一个保留块的 EOF 后半部分
+
+    //*2.1.1 direct blocks
+    const uint32_t direct_end = std::min(tail_idx, NDIRECT);
+    for (uint32_t i = direct_end; i < NDIRECT; ++i) {
+      if (node->blocks[i] != NULL_BLOCK) {
+        if (auto r = balloc.free(node->blocks[i]); !r)
+          return std::unexpected(r.error());
+        node->blocks[i] = NULL_BLOCK;
+      }
+    }
+
+    //*2.1.2 single-indirect blocks
+    const block_id single_block = node->blocks[NDIRECT];
+    if (single_block != NULL_BLOCK) {
+      auto single_ptrs = read_ptrs(dev_, single_block);
+      if (!single_ptrs)
+        return std::unexpected(single_ptrs.error());
+
+      uint32_t keep_single = 0;
+      if (tail_idx > NDIRECT)
+        keep_single = std::min(tail_idx - NDIRECT, p);
+
+      for (uint32_t i = keep_single; i < p; ++i) {
+        if ((*single_ptrs)[i] != NULL_BLOCK) {
+          if (auto r = balloc.free((*single_ptrs)[i]); !r)
+            return std::unexpected(r.error());
+          (*single_ptrs)[i] = NULL_BLOCK;
+        }
+      }
+
+      if (keep_single == 0) {
+        if (auto r = balloc.free(single_block); !r)
+          return std::unexpected(r.error());
+        node->blocks[NDIRECT] = NULL_BLOCK;
+      } else {
+        if (auto r = write_ptrs(dev_, single_block, *single_ptrs); !r)
+          return std::unexpected(r.error());
+      }
+    }
+
+    //*2.1.3 double-indirect blocks
+    const block_id double_block = node->blocks[NDIRECT + 1];
+    if (double_block != NULL_BLOCK) {
+      auto double_ptrs = read_ptrs(dev_, double_block);
+      if (!double_ptrs)
+        return std::unexpected(double_ptrs.error());
+
+      uint32_t keep_double = 0;
+      if (tail_idx > NDIRECT + p) {
+        keep_double =
+            std::min(tail_idx - NDIRECT - p, p * p);
+      }
+
+      const uint32_t keep_tables =
+          (keep_double + p - 1) / p;
+
+      for (uint32_t i = keep_tables; i < p; ++i) {
+        if ((*double_ptrs)[i] == NULL_BLOCK)
+          continue;
+
+        auto table_ptrs = read_ptrs(dev_, (*double_ptrs)[i]);
+        if (!table_ptrs)
+          return std::unexpected(table_ptrs.error());
+
+        for (block_id data_block : *table_ptrs) {
+          if (data_block != NULL_BLOCK) {
+            if (auto r = balloc.free(data_block); !r)
+              return std::unexpected(r.error());
+          }
+        }
+
+        if (auto r = balloc.free((*double_ptrs)[i]); !r)
+          return std::unexpected(r.error());
+
+        (*double_ptrs)[i] = NULL_BLOCK;
+      }
+
+      if (keep_tables > 0) {
+        const uint32_t last_table = keep_tables - 1;
+        const uint32_t keep_in_last =
+            keep_double - last_table * p;
+
+        if (keep_in_last < p &&
+            (*double_ptrs)[last_table] != NULL_BLOCK) {
+          auto table_ptrs =
+              read_ptrs(dev_, (*double_ptrs)[last_table]);
+          if (!table_ptrs)
+            return std::unexpected(table_ptrs.error());
+
+          for (uint32_t i = keep_in_last; i < p; ++i) {
+            if ((*table_ptrs)[i] != NULL_BLOCK) {
+              if (auto r = balloc.free((*table_ptrs)[i]); !r)
+                return std::unexpected(r.error());
+              (*table_ptrs)[i] = NULL_BLOCK;
+            }
+          }
+
+          if (auto r = write_ptrs(
+                  dev_, (*double_ptrs)[last_table], *table_ptrs);
+              !r)
+            return std::unexpected(r.error());
+        }
+      }
+
+      if (keep_tables == 0) {
+        if (auto r = balloc.free(double_block); !r)
+          return std::unexpected(r.error());
+        node->blocks[NDIRECT + 1] = NULL_BLOCK;
+      } else {
+        if (auto r = write_ptrs(dev_, double_block, *double_ptrs); !r)
+          return std::unexpected(r.error());
+      }
+    }
+
+    //*2.1.4 clear the unused tail of the last retained block
+    if (new_size > 0 && new_size % bs != 0) {
+      const uint32_t logical_idx = new_size / bs;
+      auto physical = logical_to_physical_block(
+          *node, logical_idx, false, balloc, bs);
+
+      if (!physical)
+        return std::unexpected(physical.error());
+
+      if (*physical != NULL_BLOCK) {
+        std::vector<std::byte> block(bs);
+
+        if (auto r = dev_.read_block(*physical, block); !r)
+          return std::unexpected(r.error());
+
+        std::memset(
+            block.data() + (new_size % bs),
+            0,
+            bs - (new_size % bs));
+
+        if (auto r = dev_.write_block(
+                *physical, block, BlockKind::Data);
+            !r)
+          return std::unexpected(r.error());
+      }
+    }
+
+    node->size = new_size;
+
+    if (auto r = inodes_.write_inode(id, *node); !r)
+      return std::unexpected(r.error());
+
+    return Attr{
+        .inode_id = id,
+        .is_dir = false,
+        .size = node->size,
+    };
+  }
+
+  //*2.2 grow
+  //Growing a file changes its size without allocating the added range
+  node->size = new_size;
+  if (auto r = inodes_.write_inode(id, *node); !r) //?这里因为是一个Result，所以要解一下
+    return std::unexpected(r.error());
+
+  //*3. return
+  Attr attr{
+      .inode_id = id,
+      .is_dir = node->type == INODE_DIR,
+      .size = node->size,
+  };
+
+
+  return attr;
 }
 }  // namespace nanofs
