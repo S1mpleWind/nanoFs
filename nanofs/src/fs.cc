@@ -168,14 +168,86 @@ Result<block_id> FsLayer::logical_to_physical_block(inode& node, uint32_t logica
 
 Result<std::string> FsLayer::read_bytes(inode& node, uint32_t off,
                                         uint32_t len) {
-  /* TODO Lab1A: Your code here */
-  return std::unexpected(Error::IoError);
+  //*0. pre check, make sure read after EOF and at most read to EOF
+  if (off >= node.size || len == 0) return std::string{};
+  const uint32_t count = std::min<uint32_t>(len, node.size - off);
+  const uint32_t bs = static_cast<uint32_t>(dev_.block_size());
+  
+  //*0.5 prepare allocator
+  auto sb = super();
+  if (!sb) return std::unexpected(sb.error());
+  BlockAllocator balloc(dev_, sb->block_bitmap_start,
+                        sb->block_bitmap_blocks, sb->data_start,
+                        sb->num_blocks);
+
+  std::string result(count, '\0');
+  std::vector<std::byte> block(bs);
+
+  //*1.loop to read bytes
+  uint32_t done = 0;
+  while (done < count) {
+    const uint32_t position = off + done;
+    const uint32_t logical_idx = position / bs;
+    const uint32_t block_offset = position % bs;
+    const uint32_t chunk = std::min(bs - block_offset, count - done);
+    auto physical = logical_to_physical_block(node, logical_idx, false,
+                                               balloc, bs);
+    if (!physical) return std::unexpected(physical.error());
+    if (*physical != NULL_BLOCK) {
+      if (auto r = dev_.read_block(*physical, block); !r)
+        return std::unexpected(r.error());
+      std::memcpy(result.data() + done, block.data() + block_offset, chunk);
+    }
+    done += chunk;
+  }
+  return result;
 }
 
 Result<uint32_t> FsLayer::write_bytes(inode_id id, inode& node, uint32_t off,
                                       const std::string& data) {
-  /* TODO Lab1A: Your code here */
-  return std::unexpected(Error::IoError);
+  //*0. pre check
+  if (data.empty()) return 0u;
+
+  const uint32_t bs = static_cast<uint32_t>(dev_.block_size());
+  //*0.5 prepare allocator
+  auto sb = super();
+  if (!sb) return std::unexpected(sb.error());
+  BlockAllocator balloc(dev_, sb->block_bitmap_start,
+                        sb->block_bitmap_blocks, sb->data_start,
+                        sb->num_blocks);
+
+  std::vector<std::byte> block(bs);
+  uint32_t done = 0;
+  //*1. write the data block by block
+  while (done < data.size()) {
+    const uint32_t position = off + done;
+    const uint32_t logical_idx = position / bs;
+    const uint32_t block_offset = position % bs;
+    const uint32_t chunk = std::min(bs - block_offset,
+                                    static_cast<uint32_t>(data.size() - done));
+
+    //*1.5 map the logical block, allocating missing data and indirect blocks
+    auto physical = logical_to_physical_block(node, logical_idx, true,
+                                               balloc, bs);
+    if (!physical) return std::unexpected(physical.error());
+
+    //*2. preserve bytes outside the write range for a partial-block write
+    if (block_offset != 0 || chunk != bs) {
+      if (auto r = dev_.read_block(*physical, block); !r)
+        return std::unexpected(r.error());
+    }
+    std::memcpy(block.data() + block_offset, data.data() + done, chunk);
+    if (auto r = dev_.write_block(*physical, block, BlockKind::Data); !r)
+      return std::unexpected(r.error());
+    done += chunk;
+  }
+
+  //*3. grow the inode and persist its updated block pointers
+  const uint32_t end = off + static_cast<uint32_t>(data.size());
+  if (end > node.size) node.size = end;
+  if (auto r = inodes_.write_inode(id, node); !r)
+    return std::unexpected(r.error());
+  return static_cast<uint32_t>(data.size());
 }
 
 Result<Attr> FsLayer::getattr(inode_id id) {
