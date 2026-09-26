@@ -6,3 +6,4 @@ __pycache__/
 handin-*.tgz
 .run/
 .DS_Store
+.vscode
