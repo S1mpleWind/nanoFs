@@ -306,7 +306,7 @@ Result<std::vector<DirEntry>> FsLayer::read_dir_entries(inode_id dir) {
   auto bytes = read_bytes(*node, 0, node->size);
   if (!bytes) return std::unexpected(bytes.error());
 
-  std::vector<DirEntry> entries;
+  std::vector<DirEntry> entries;//store in vec
   for (size_t off = 0; off + sizeof(DirEntry) <= bytes->size();
        off += sizeof(DirEntry)) {
     DirEntry entry{};
@@ -387,7 +387,49 @@ Result<void> FsLayer::add_dir_entry(inode_id dir, const std::string& name,
 
 Result<void> FsLayer::remove_dir_entry(inode_id dir, const std::string& name) {
   /* TODO Lab1A: Your code here */
-  return std::unexpected(Error::IoError);
+  //? removing an entry does not shrink the dir file
+  //* 0. validate the name and target
+  if (name.size() >= NANOFS_NAME_MAX )
+    return std::unexpected(Error::Invalid);
+
+  auto node = inodes_.read_inode(dir); //get the parent directory inode
+  if (!node) return std::unexpected(node.error());
+  if (node->type != INODE_DIR)
+    return std::unexpected(Error::NotDir);
+
+  //* 1. find the entry
+  auto raw = read_bytes(*node, 0, node->size); //node,offset,length
+  if (!raw) return std::unexpected(raw.error());
+
+  uint32_t slot = std::numeric_limits<uint32_t>::max();
+
+  for (uint32_t off = 0; off + sizeof(DirEntry) <= raw->size();
+       off += sizeof(DirEntry)) {
+    DirEntry entry{}; 
+    std::memcpy(&entry, raw->data() + off, sizeof(entry));
+
+    // find the name
+    if (entry.inode_id != 0 &&
+      std::strncmp(entry.name, name.c_str(), NANOFS_NAME_MAX) == 0){
+        slot = off;
+        break;
+      }
+  }
+
+// no wanted entry: unlink is idempotent
+  if (slot == std::numeric_limits<uint32_t>::max())
+    return {};
+
+  DirEntry entry{};
+  entry.inode_id = 0;
+  std::string encoded(sizeof(entry), '\0');
+  std::memcpy(encoded.data(), &entry, sizeof(entry));
+
+  //*2.write back the entry bytes
+  if (auto r = write_bytes(dir, *node, slot, encoded); !r)
+    return std::unexpected(r.error());
+
+  return {};
 }
 
 Result<inode_id> FsLayer::make_node(inode_id parent, const std::string& name,
@@ -430,17 +472,147 @@ Result<inode_id> FsLayer::mkdir(inode_id parent, const std::string& name) {
 Result<void> FsLayer::free_file_blocks(inode& node, BlockAllocator& balloc,
                                        uint32_t bs) {
   /* TODO Lab1A: Your code here */
-  return std::unexpected(Error::IoError);
+  //* 0. free direct data blocks
+  for (uint32_t i = 0; i < NDIRECT; ++i) {
+    if (node.blocks[i] == NULL_BLOCK) continue;
+    if (auto r = balloc.free(node.blocks[i]); !r)
+      return std::unexpected(r.error());
+    node.blocks[i] = NULL_BLOCK;
+  }
+
+  const uint32_t p = bs / sizeof(block_id);
+
+  //* 1. free the single-indirect table and all data blocks it references
+  if (node.blocks[NDIRECT] != NULL_BLOCK) {
+    const block_id table = node.blocks[NDIRECT];
+    auto ptrs = read_ptrs(dev_, table);
+    if (!ptrs) return std::unexpected(ptrs.error());
+
+    for (block_id data : *ptrs) {
+      if (data == NULL_BLOCK) continue;
+      if (auto r = balloc.free(data); !r)
+        return std::unexpected(r.error());
+    }
+    if (auto r = balloc.free(table); !r)
+      return std::unexpected(r.error());
+    node.blocks[NDIRECT] = NULL_BLOCK;
+  }
+
+  //* 2. free the double-indirect tree
+  if (node.blocks[NDIRECT + 1] != NULL_BLOCK) {
+    const block_id root = node.blocks[NDIRECT + 1];
+    auto root_ptrs = read_ptrs(dev_, root);
+    if (!root_ptrs) return std::unexpected(root_ptrs.error());
+
+    for (block_id table : *root_ptrs) {
+      if (table == NULL_BLOCK) continue;
+      auto ptrs = read_ptrs(dev_, table);
+      if (!ptrs) return std::unexpected(ptrs.error());
+
+      for (block_id data : *ptrs) {
+        if (data == NULL_BLOCK) continue;
+        if (auto r = balloc.free(data); !r)
+          return std::unexpected(r.error());
+      }
+      if (auto r = balloc.free(table); !r)
+        return std::unexpected(r.error());
+    }
+
+    if (auto r = balloc.free(root); !r)
+      return std::unexpected(r.error());
+    node.blocks[NDIRECT + 1] = NULL_BLOCK;
+  }
+
+  //* 3. reset the inode's file state
+  node.size = 0;
+  return {};
 }
 
 Result<void> FsLayer::unlink(inode_id parent, const std::string& name) {
   /* TODO Lab1A: Your code here */
-  return std::unexpected(Error::IoError);
+  // remove a file's directory entry and reclaim its blocks and inode
+  //* 0. find the target; missing entries are idempotent
+  auto target = lookup(parent, name);
+  if (!target) {
+    if (target.error() == Error::NotFound) return {};
+    return std::unexpected(target.error());
+  }
+
+  //* 1. read and validate the target inode
+  auto node = inodes_.read_inode(*target);
+  if (!node) return std::unexpected(node.error());
+  if (node->type == INODE_DIR)
+    return std::unexpected(Error::IsDir);
+
+  //* 2. remove the directory entry
+  if (auto r = remove_dir_entry(parent, name); !r)
+    return std::unexpected(r.error());
+
+  //* 3. prepare the block allocator
+  auto sb = super();
+  if (!sb) return std::unexpected(sb.error());
+  const uint32_t bs = static_cast<uint32_t>(dev_.block_size());
+  BlockAllocator balloc(dev_, sb->block_bitmap_start,
+                        sb->block_bitmap_blocks, sb->data_start,
+                        sb->num_blocks);
+
+  //* 4. reclaim content and indirect blocks
+  if (auto r = free_file_blocks(*node, balloc, bs); !r)
+    return std::unexpected(r.error());
+
+  //* 5. persist the cleared inode and free its inode slot
+  if (auto r = inodes_.write_inode(*target, *node); !r)
+    return std::unexpected(r.error());
+  if (auto r = inodes_.free_inode(*target); !r)
+    return std::unexpected(r.error());
+
+  return {};
 }
 
 Result<void> FsLayer::rmdir(inode_id parent, const std::string& name) {
   /* TODO Lab1A: Your code here */
-  return std::unexpected(Error::IoError);
+  //* 0. find the directory; missing entries are idempotent
+  auto dir_id_result = lookup(parent, name);
+  if (!dir_id_result) {
+    if (dir_id_result.error() == Error::NotFound) return {};
+    return std::unexpected(dir_id_result.error());
+  }
+  inode_id dir_id = *dir_id_result;
+
+  //* 1. check that the target is a directory and is empty
+  auto dir_node = inodes_.read_inode(dir_id); //! 取出来操作的实体node，最终写入这个
+  if (!dir_node) return std::unexpected(dir_node.error());
+  if (dir_node->type != INODE_DIR)
+    return std::unexpected(Error::NotDir);
+
+  auto entries = read_dir_entries(dir_id);
+  if (!entries) return std::unexpected(entries.error());
+  if (!entries->empty())
+    return std::unexpected(Error::NotEmpty);
+
+  //* 2. remove the parent directory entry
+  if (auto r = remove_dir_entry(parent, name); !r)
+    return std::unexpected(r.error());
+
+  //* 3. prepare the block allocator
+  auto sb = super();
+  if (!sb) return std::unexpected(sb.error());
+  const uint32_t bs = static_cast<uint32_t>(dev_.block_size());
+  BlockAllocator balloc(dev_, sb->block_bitmap_start,
+                        sb->block_bitmap_blocks, sb->data_start,
+                        sb->num_blocks);
+
+  //* 4. reclaim the directory's content and indirect blocks
+  if (auto r = free_file_blocks(*dir_node, balloc, bs); !r)
+    return std::unexpected(r.error());
+
+  //* 5. persist the cleared inode and free its inode slot
+  if (auto r = inodes_.write_inode(dir_id, *dir_node); !r)
+    return std::unexpected(r.error());
+  if (auto r = inodes_.free_inode(dir_id); !r)
+    return std::unexpected(r.error());
+
+  return {};
 }
 
 Result<Attr> FsLayer::setattr(inode_id id, uint32_t new_size) {
