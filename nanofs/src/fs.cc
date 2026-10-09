@@ -303,6 +303,7 @@ Result<std::vector<DirEntry>> FsLayer::read_dir_entries(inode_id dir) {
     return std::unexpected(Error::NotDir);
 
   //* 1. read the directory file; unused slots are skipped
+  //*    and convert them to 
   auto bytes = read_bytes(*node, 0, node->size);
   if (!bytes) return std::unexpected(bytes.error());
 
