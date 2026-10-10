@@ -21,5 +21,5 @@ inline constexpr uint32_t ROOT_GENERATION = 1;
 // Unallocated or out-of-range inode number, or generation mismatch: Error::Stale.
 // Other storage errors, such as IoError, are propagated.
 Result<inode_id> resolve_handle(InodeManager& inodes, FileHandle h);
-
+  //* for server side use
 }  // namespace nanofs

@@ -24,8 +24,22 @@ Error code_to_error(int code);
 // most `retries` times, then Error::IoError. Retries can deliver a request more than once; success is not guaranteed.
 template <class Fn>
 auto call_with_retry(Fn&& attempt, int retries, int backoff_ms) -> std::invoke_result_t<Fn&> {
-  /* TODO Lab1B: Your code here */
-  return std::unexpected(Error::IoError);
+  //TODO Lab1B: Your code here
+  int retry_times = 0;
+  int wait = backoff_ms;
+
+  while (true) {
+    try {
+      return attempt();
+    } catch (const std::exception&) {
+      if (retry_times >= retries)
+        return std::unexpected(Error::IoError);
+
+      std::this_thread::sleep_for(std::chrono::milliseconds(wait));
+      ++retry_times;
+      wait *= 2;
+    }
+  }
 }
 
 // The RPC implementation of FsBackend: each method serialises its arguments into an fs_*

@@ -97,6 +97,14 @@ Result<inode_id> InodeManager::allocate_inode(uint32_t type) {
   if (!blk) { (void)ialloc.free(*id); return std::unexpected(blk.error()); }
   uint32_t gen = 1;  // Lab1A uses a fixed generation; Lab1B updates it on allocation.
   /* TODO Lab1B: Your code here */
+  //* get generation num and ++
+  auto previous_gen = generation(*id);
+  if (!previous_gen) {
+    (void)balloc.free(*blk);
+    (void)ialloc.free(*id);
+    return std::unexpected(previous_gen.error());
+  }
+  gen = *previous_gen + 1;
   if (auto r = set_table(*id, *blk, gen); !r) {
     (void)balloc.free(*blk);
     (void)ialloc.free(*id);
