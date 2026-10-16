@@ -203,6 +203,8 @@ Result<std::string> FsLayer::read_bytes(inode& node, uint32_t off,
   return result;
 }
 
+// TODO Lab2A: classify writes here as BlockKind::Data for regular-file
+// contents and BlockKind::Meta for directory contents.
 Result<uint32_t> FsLayer::write_bytes(inode_id id, inode& node, uint32_t off,
                                       const std::string& data) {
   //*0. pre check
@@ -433,6 +435,8 @@ Result<void> FsLayer::remove_dir_entry(inode_id dir, const std::string& name) {
   return {};
 }
 
+// TODO Lab2B: keep this operation inside its existing parent lock; avoid
+// re-entering LockedFs through a virtual lookup.
 Result<inode_id> FsLayer::make_node(inode_id parent, const std::string& name,
                                     uint32_t type) {
   /* TODO Lab1A: Your code here */
@@ -529,6 +533,7 @@ Result<void> FsLayer::free_file_blocks(inode& node, BlockAllocator& balloc,
   return {};
 }
 
+// TODO Lab2B: avoid re-entering LockedFs for this internal lookup.
 Result<void> FsLayer::unlink(inode_id parent, const std::string& name) {
   /* TODO Lab1A: Your code here */
   // remove a file's directory entry and reclaim its blocks and inode
@@ -570,6 +575,7 @@ Result<void> FsLayer::unlink(inode_id parent, const std::string& name) {
   return {};
 }
 
+// TODO Lab2B: avoid re-entering LockedFs for this internal lookup.
 Result<void> FsLayer::rmdir(inode_id parent, const std::string& name) {
   /* TODO Lab1A: Your code here */
   //* 0. find the directory; missing entries are idempotent
