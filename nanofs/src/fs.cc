@@ -234,12 +234,22 @@ Result<uint32_t> FsLayer::write_bytes(inode_id id, inode& node, uint32_t off,
     if (!physical) return std::unexpected(physical.error());
 
     //*2. preserve bytes outside the write range for a partial-block write
+
+    // 读取原块里的内容，写到内存的`block`里
     if (block_offset != 0 || chunk != bs) {
       if (auto r = dev_.read_block(*physical, block); !r)
         return std::unexpected(r.error());
     }
+
+    // 把这轮要写的再写到`block`对应的位置里，覆盖原先的部分
     std::memcpy(block.data() + block_offset, data.data() + done, chunk);
-    if (auto r = dev_.write_block(*physical, block, BlockKind::Data); !r)
+
+    //* 目录内容属于元数据；普通文件内容属于数据；新增
+    const BlockKind kind =
+        node.type == INODE_DIR ? BlockKind::Meta : BlockKind::Data;
+        
+    // 持久化写回
+    if (auto r = dev_.write_block(*physical, block, kind); !r)
       return std::unexpected(r.error());
     done += chunk;
   }
