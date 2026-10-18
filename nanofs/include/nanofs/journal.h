@@ -133,11 +133,13 @@ class JournaledBlockDevice : public BlockDevice {
   BlockDevice& journal_;
   block_id checkpoint_threshold_;
   block_id cursor_ = 0;        // next free block in the journal
+
   // Write sets are keyed by thread so several transactions can be in flight at once
   // (before-or-after is LockedFs's job with its per-inode locks; the journal only has
   // to keep threads from seeing each other's uncommitted writes). Single-threaded it
   // degenerates to one entry, and the JournalCrash matrix is unaffected.
-  using WriteSet = std::map<block_id, std::vector<std::byte>>;
+  using WriteSet = std::map<block_id, std::vector<std::byte>>;//*
+
   std::mutex tx_map_mutex_;                              // guards insert/erase on txs_ (not the block data inside)
   std::unordered_map<std::thread::id, WriteSet> txs_;    // this thread's active write set
   std::mutex journal_lock_;                              // guards the log tail: the serial commit critical section (append+flush+apply+cursor)

@@ -247,7 +247,7 @@ Result<uint32_t> FsLayer::write_bytes(inode_id id, inode& node, uint32_t off,
     //* 目录内容属于元数据；普通文件内容属于数据；新增
     const BlockKind kind =
         node.type == INODE_DIR ? BlockKind::Meta : BlockKind::Data;
-        
+
     // 持久化写回
     if (auto r = dev_.write_block(*physical, block, kind); !r)
       return std::unexpected(r.error());
@@ -457,7 +457,7 @@ Result<inode_id> FsLayer::make_node(inode_id parent, const std::string& name,
     return std::unexpected(Error::NotDir);
 
   //* 1. an existing name is idempotent
-  auto existing = lookup(parent, name);
+  auto existing = FsLayer::lookup(parent, name);
   if (existing) return *existing;
   if (existing.error() != Error::NotFound)
     return std::unexpected(existing.error());
@@ -548,7 +548,7 @@ Result<void> FsLayer::unlink(inode_id parent, const std::string& name) {
   /* TODO Lab1A: Your code here */
   // remove a file's directory entry and reclaim its blocks and inode
   //* 0. find the target; missing entries are idempotent
-  auto target = lookup(parent, name);
+  auto target = FsLayer::lookup(parent, name);
   if (!target) {
     if (target.error() == Error::NotFound) return {};
     return std::unexpected(target.error());
@@ -589,7 +589,7 @@ Result<void> FsLayer::unlink(inode_id parent, const std::string& name) {
 Result<void> FsLayer::rmdir(inode_id parent, const std::string& name) {
   /* TODO Lab1A: Your code here */
   //* 0. find the directory; missing entries are idempotent
-  auto dir_id_result = lookup(parent, name);
+  auto dir_id_result = FsLayer::lookup(parent, name);
   if (!dir_id_result) {
     if (dir_id_result.error() == Error::NotFound) return {};
     return std::unexpected(dir_id_result.error());

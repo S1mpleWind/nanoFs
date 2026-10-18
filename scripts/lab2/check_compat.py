@@ -8,8 +8,12 @@ import sys
 
 
 def code_without_comments(text: str) -> str:
-    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
-    return re.sub(r"//.*", "", text)
+    # Match tokens left to right so //* stays a line comment, and preserve
+    # quoted strings/characters that contain comment-like text.
+    tokens = r'''"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|//[^\n]*|/\*.*?\*/'''
+    return re.sub(tokens,
+                  lambda match: " " if match.group().startswith(("//", "/*"))
+                  else match.group(), text, flags=re.S)
 
 
 def function(text: str, start: str, end: str) -> str:
