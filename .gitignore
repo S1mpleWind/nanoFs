@@ -6,3 +6,7 @@ __pycache__/
 handin-*.tgz
 .run/
 .DS_Store
+# nanoCoder local configuration may contain API credentials
+nanocoder.config.json
+.pytest_cache/
+logs/
