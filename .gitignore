@@ -7,3 +7,7 @@ handin-*.tgz
 .run/
 .DS_Store
 .vscode
+# nanoCoder local configuration may contain API credentials
+nanocoder.config.json
+.pytest_cache/
+logs/
